@@ -1,0 +1,19 @@
+{
+  "name": "dark-shield",
+  "version": "1.0.0",
+  "description": "DarkShield - DeFi Risk Shield with TEE-Protected Autonomous Hedging",
+  "private": true,
+  "workspaces": [
+    "contracts",
+    "frontend"
+  ],
+  "scripts": {
+    "install:all": "npm install --workspaces",
+    "build:contracts": "npm run build --workspace=contracts",
+    "build:frontend": "npm run build --workspace=frontend",
+    "test:contracts": "npm run test --workspace=contracts",
+    "deploy:testnet": "npm run deploy:testnet --workspace=contracts"
+  },
+  "keywords": ["defi", "risk-management", "0g", "tee", "hackathon"],
+  "license": "MIT"
+}

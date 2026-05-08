@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --risk-low: #22c55e;
+  --risk-medium: #eab308;
+  --risk-high: #f97316;
+  --risk-critical: #ef4444;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+/* 风险等级颜色 */
+.risk-low { color: var(--risk-low); }
+.risk-medium { color: var(--risk-medium); }
+.risk-high { color: var(--risk-high); }
+.risk-critical { color: var(--risk-critical); }
+
+/* 背景色 */
+.bg-risk-low { background-color: var(--risk-low); }
+.bg-risk-medium { background-color: var(--risk-medium); }
+.bg-risk-high { background-color: var(--risk-high); }
+.bg-risk-critical { background-color: var(--risk-critical); }
+
+/* 动画 */
+@keyframes pulse-risk {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.animate-pulse-risk {
+  animation: pulse-risk 2s ease-in-out infinite;
+}
