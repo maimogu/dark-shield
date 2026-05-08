@@ -19,8 +19,8 @@ module.exports = {
       url: "http://127.0.0.1:8545"
     },
     testnet: {
-      url: process.env.OG_TESTNET_RPC || "https://rpc.testnet.0g.ai",
-      chainId: 11860,
+      url: process.env.OG_TESTNET_RPC || "https://evmrpc-testnet.0g.ai",
+      chainId: 16602,
       accounts: process.env.DEPLOYER_KEY ? [process.env.DEPLOYER_KEY] : [],
       gasPrice: "auto"
     }
