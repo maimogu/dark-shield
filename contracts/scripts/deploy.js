@@ -78,6 +78,27 @@ async function main() {
     console.log("  交易哈希:", riskHedgeExecutor.deploymentTransaction().hash, "\n");
 
     // ========================================
+    // 连接 0G Integration 合约
+    // ========================================
+    const deploymentsDir = path.join(__dirname, "..", "deployments");
+    const ogDeploymentPath = path.join(deploymentsDir, "deployment-0g-integration.json");
+    let zeroGIntegrationAddress = null;
+
+    if (fs.existsSync(ogDeploymentPath)) {
+        const ogDeployment = JSON.parse(fs.readFileSync(ogDeploymentPath, "utf8"));
+        zeroGIntegrationAddress = ogDeployment.contracts.OgIntegration.address;
+        console.log("发现已部署的 0GIntegration 合约:", zeroGIntegrationAddress);
+        console.log("正在将 RiskHedgeExecutor 与 0G Integration 连接...");
+
+        const tx = await riskHedgeExecutor.setZeroGIntegration(zeroGIntegrationAddress);
+        await tx.wait();
+        console.log("连接成功！交易哈希:", tx.hash, "\n");
+    } else {
+        console.log("未找到已部署的 0GIntegration 合约，跳过连接步骤");
+        console.log("请先运行: npx hardhat run scripts/deploy-0g-integration.js --network <network>\n");
+    }
+
+    // ========================================
     // 输出部署摘要
     // ========================================
     console.log("========================================");
@@ -85,6 +106,9 @@ async function main() {
     console.log("========================================");
     console.log("TEEDecisionVerifier:", teeVerifierAddress);
     console.log("RiskHedgeExecutor:  ", riskHedgeExecutorAddress);
+    if (zeroGIntegrationAddress) {
+        console.log("OgIntegration:      ", zeroGIntegrationAddress);
+    }
     console.log("========================================\n");
 
     // ========================================

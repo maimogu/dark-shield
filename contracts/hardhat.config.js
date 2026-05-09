@@ -21,7 +21,7 @@ module.exports = {
     testnet: {
       url: process.env.OG_TESTNET_RPC || "https://evmrpc-testnet.0g.ai",
       chainId: 16602,
-      accounts: process.env.DEPLOYER_KEY ? [process.env.DEPLOYER_KEY] : [],
+      accounts: (process.env.DEPLOYER_KEY && process.env.DEPLOYER_KEY.startsWith("0x") && process.env.DEPLOYER_KEY.length === 66) ? [process.env.DEPLOYER_KEY] : ["0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"],
       gasPrice: "auto"
     }
   },
