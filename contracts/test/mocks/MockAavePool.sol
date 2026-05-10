@@ -72,4 +72,12 @@ contract MockAavePool is IAavePool {
         uint16
     ) external pure override {
     }
+
+    function repay(
+        address,
+        uint256,
+        uint256,
+        address
+    ) external pure override {
+    }
 }
