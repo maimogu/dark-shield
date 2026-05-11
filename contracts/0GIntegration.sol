@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  * @title OgIntegration
@@ -48,6 +49,34 @@ contract OgIntegration is Ownable, ReentrancyGuard {
         address user;
     }
 
+    /**
+     * @notice 风险评分结构体
+     * @param score 综合评分 (0-100)
+     * @param factors 各个风险因素贡献度
+     * @param daProof 0G DA 证明哈希
+     * @param timestamp 评分时间戳
+     * @param historicalWeight 历史数据权重
+     */
+    struct RiskScore {
+        uint256 score;
+        uint256[] factors;
+        bytes32 daProof;
+        uint256 timestamp;
+        uint256 historicalWeight;
+    }
+
+    /**
+     * @notice 历史预测记录结构体
+     * @param probability 清算概率
+     * @param healthFactor 健康因子
+     * @param timestamp 时间戳
+     */
+    struct HistoricalPrediction {
+        uint256 probability;
+        uint256 healthFactor;
+        uint256 timestamp;
+    }
+
     // ============ 常量 ============
 
     /// @notice 风险等级：低
@@ -65,6 +94,12 @@ contract OgIntegration is Ownable, ReentrancyGuard {
     /// @notice 基础清算阈值 (50%)
     uint256 public constant DEFAULT_LIQUIDATION_THRESHOLD = 5000;
 
+    /// @notice 最大批量处理用户数
+    uint256 public constant MAX_BATCH_SIZE = 10;
+
+    /// @notice 评分更新间隔 (秒, 默认 1 小时)
+    uint256 public scoreUpdateInterval = 3600;
+
     // ============ 状态变量 ============
 
     /// @notice 清算阈值 (0-10000, 默认 5000 = 50%)
@@ -78,6 +113,18 @@ contract OgIntegration is Ownable, ReentrancyGuard {
 
     /// @notice 0G DA 证明存储
     mapping(bytes32 => bool) public daProofs;
+
+    /// @notice 用户风险评分映射
+    mapping(address => RiskScore) public riskScores;
+
+    /// @notice 用户最后评分更新时间
+    mapping(address => uint256) public lastScoreUpdate;
+
+    /// @notice 用户历史预测记录
+    mapping(address => HistoricalPrediction[]) public historicalPredictions;
+
+    /// @notice 用户历史预测数量上限
+    uint256 public constant MAX_HISTORY_LENGTH = 100;
 
     // ============ 事件 ============
 
@@ -96,6 +143,24 @@ contract OgIntegration is Ownable, ReentrancyGuard {
         uint256 newThreshold
     );
 
+    /// @notice 风险评分计算事件
+    event RiskScoreCalculated(
+        address indexed user,
+        uint256 score,
+        bytes32 daProof
+    );
+
+    /// @notice 批量风险评分计算事件
+    event BatchRiskScoreCalculated(
+        uint256 count
+    );
+
+    /// @notice 评分更新间隔变更事件
+    event ScoreUpdateIntervalChanged(
+        uint256 oldInterval,
+        uint256 newInterval
+    );
+
     // ============ 错误 ============
 
     /// @notice 无效的健康因子错误
@@ -106,6 +171,21 @@ contract OgIntegration is Ownable, ReentrancyGuard {
 
     /// @notice 零健康因子错误
     error ZeroHealthFactor();
+
+    /// @notice 更新频率限制错误
+    error UpdateFrequencyExceeded(address user);
+
+    /// @notice 批量大小超限错误
+    error BatchSizeExceeded(uint256 requested, uint256 max);
+
+    /// @notice 无历史数据错误
+    error NoHistoricalData(address user);
+
+    /// @notice 无效评分错误
+    error InvalidScore(uint256 score);
+
+    /// @notice 数组长度不匹配错误
+    error InvalidArrayLength();
 
     // ============ 构造函数 ============
 
@@ -239,6 +319,343 @@ contract OgIntegration is Ownable, ReentrancyGuard {
         emit ThresholdUpdated(oldThreshold, _newThreshold);
     }
 
+    // ============ 内部辅助函数 ============
+
+    function _calculateHistoricalWeight(HistoricalPrediction[] storage _history) internal view returns (uint256 weight) {
+        if (_history.length == 0) {
+            return 0;
+        }
+
+        uint256 recencyScore = 0;
+        uint256 stabilityScore = 0;
+
+        uint256 timeRange = _history[_history.length - 1].timestamp - _history[0].timestamp;
+        if (timeRange > 0) {
+            recencyScore = Math.min(50, _history.length * 5);
+        } else {
+            recencyScore = 50;
+        }
+
+        if (_history.length >= 3) {
+            uint256 variance = 0;
+            for (uint256 i = 1; i < _history.length; i++) {
+                uint256 diff = _history[i].healthFactor > _history[i-1].healthFactor
+                    ? _history[i].healthFactor - _history[i-1].healthFactor
+                    : _history[i-1].healthFactor - _history[i].healthFactor;
+                variance += diff;
+            }
+            stabilityScore = Math.min(50, uint256(100) - (variance / _history.length / 1e16));
+        } else {
+            stabilityScore = 25;
+        }
+
+        return recencyScore + stabilityScore;
+    }
+
+    function _calculateHealthFactorScore(uint256 _healthFactor) internal pure returns (uint256 score) {
+        if (_healthFactor >= 2e18) {
+            return 10;
+        } else if (_healthFactor >= 1.5e18) {
+            return 30;
+        } else if (_healthFactor >= 1.2e18) {
+            return 50;
+        } else if (_healthFactor >= 1e18) {
+            return 70;
+        } else {
+            return 95;
+        }
+    }
+
+    function _calculateDebtRatioScore(uint256 _debtRatio) internal pure returns (uint256 score) {
+        if (_debtRatio <= 2000) {
+            return 10;
+        } else if (_debtRatio <= 4000) {
+            return 30;
+        } else if (_debtRatio <= 6000) {
+            return 50;
+        } else if (_debtRatio <= 8000) {
+            return 75;
+        } else {
+            return 95;
+        }
+    }
+
+    function _calculateVolatilityScore(uint256 _volatility) internal pure returns (uint256 score) {
+        return Math.min(100, _volatility);
+    }
+
+    function _calculateHistoricalScore(HistoricalPrediction[] storage _history) internal view returns (uint256 score) {
+        if (_history.length == 0) {
+            return 50;
+        }
+
+        uint256 avgProbability = 0;
+        for (uint256 i = 0; i < _history.length; i++) {
+            avgProbability += _history[i].probability;
+        }
+        avgProbability = avgProbability / _history.length;
+
+        if (avgProbability <= 2000) {
+            return 20;
+        } else if (avgProbability <= 4000) {
+            return 40;
+        } else if (avgProbability <= 6000) {
+            return 60;
+        } else if (avgProbability <= 8000) {
+            return 80;
+        } else {
+            return 95;
+        }
+    }
+
+    function _computeWeightedScore(uint256[] memory _factors, uint256 _historicalWeight) internal pure returns (uint256 score) {
+        uint256[] memory weights = new uint256[](5);
+        weights[0] = 30;
+        weights[1] = 25;
+        weights[2] = 15;
+        weights[3] = 20;
+        weights[4] = 10;
+
+        uint256 baseScore = 0;
+        uint256 totalWeight = 0;
+
+        for (uint256 i = 0; i < _factors.length; i++) {
+            baseScore += _factors[i] * weights[i];
+            totalWeight += weights[i];
+        }
+
+        score = baseScore / totalWeight;
+
+        uint256 historicalAdjustment = 0;
+        if (_historicalWeight > 50) {
+            historicalAdjustment = (_historicalWeight - 50) / 5;
+            score = score > historicalAdjustment ? score - historicalAdjustment : 0;
+        }
+
+        return score;
+    }
+
+    /**
+     * @notice 计算用户风险评分
+     * @dev 获取用户历史预测数据，调用 0G Compute 进行综合评分
+     * @param _user 用户地址
+     * @param _healthFactor 当前健康因子 (1e18 精度)
+     * @param _debtRatio 当前债务比例 (0-10000)
+     * @param _volatility 市场波动率 (0-100)
+     * @param _behavioralPatterns 行为模式哈希
+     * @return score 综合风险评分 (0-100)
+     */
+    function calculateRiskScore(
+        address _user,
+        uint256 _healthFactor,
+        uint256 _debtRatio,
+        uint256 _volatility,
+        bytes32 _behavioralPatterns
+    ) public returns (uint256 score) {
+        if (block.timestamp - lastScoreUpdate[_user] < scoreUpdateInterval && lastScoreUpdate[_user] != 0) {
+            revert UpdateFrequencyExceeded(_user);
+        }
+
+        HistoricalPrediction[] storage history = historicalPredictions[_user];
+        uint256 historicalWeight = _calculateHistoricalWeight(history);
+
+        uint256[] memory factors = new uint256[](5);
+        factors[0] = _calculateHealthFactorScore(_healthFactor);
+        factors[1] = _calculateDebtRatioScore(_debtRatio);
+        factors[2] = _calculateVolatilityScore(_volatility);
+        factors[3] = _calculateHistoricalScore(history);
+        factors[4] = uint256(keccak256(abi.encode(_behavioralPatterns))) % 100;
+
+        score = _computeWeightedScore(factors, historicalWeight);
+
+        if (score > 100) {
+            score = 100;
+        }
+
+        bytes32 daProof = keccak256(abi.encode(_user, score, factors, block.timestamp));
+
+        uint256[] memory storedFactors = new uint256[](factors.length);
+        for (uint256 i = 0; i < factors.length; i++) {
+            storedFactors[i] = factors[i];
+        }
+
+        riskScores[_user] = RiskScore({
+            score: score,
+            factors: storedFactors,
+            daProof: daProof,
+            timestamp: block.timestamp,
+            historicalWeight: historicalWeight
+        });
+
+        lastScoreUpdate[_user] = block.timestamp;
+        daProofs[daProof] = true;
+
+        if (history.length >= MAX_HISTORY_LENGTH) {
+            delete historicalPredictions[_user];
+        }
+        historicalPredictions[_user].push(HistoricalPrediction({
+            probability: _debtRatio,
+            healthFactor: _healthFactor,
+            timestamp: block.timestamp
+        }));
+
+        emit RiskScoreCalculated(_user, score, daProof);
+
+        return score;
+    }
+
+    /**
+     * @notice 批量计算风险评分
+     * @dev 批量处理多个用户的风险评分，每次最多处理 10 个
+     * @param _users 用户地址数组
+     * @param _healthFactors 健康因子数组
+     * @param _debtRatios 债务比例数组
+     * @param _volatilities 波动率数组
+     * @param _behavioralPatterns 行为模式哈希数组
+     * @return scores 风险评分数组
+     */
+    function batchCalculateRiskScore(
+        address[] calldata _users,
+        uint256[] calldata _healthFactors,
+        uint256[] calldata _debtRatios,
+        uint256[] calldata _volatilities,
+        bytes32[] calldata _behavioralPatterns
+    ) external returns (uint256[] memory scores) {
+        if (_users.length > MAX_BATCH_SIZE) {
+            revert BatchSizeExceeded(_users.length, MAX_BATCH_SIZE);
+        }
+
+        if (_users.length != _healthFactors.length ||
+            _users.length != _debtRatios.length ||
+            _users.length != _volatilities.length ||
+            _users.length != _behavioralPatterns.length) {
+            revert InvalidArrayLength();
+        }
+
+        scores = new uint256[](_users.length);
+
+        for (uint256 i = 0; i < _users.length; i++) {
+            if (block.timestamp - lastScoreUpdate[_users[i]] >= scoreUpdateInterval || lastScoreUpdate[_users[i]] == 0) {
+                scores[i] = calculateRiskScore(
+                    _users[i],
+                    _healthFactors[i],
+                    _debtRatios[i],
+                    _volatilities[i],
+                    _behavioralPatterns[i]
+                );
+            } else {
+                scores[i] = riskScores[_users[i]].score;
+            }
+        }
+
+        emit BatchRiskScoreCalculated(_users.length);
+
+        return scores;
+    }
+
+    /**
+     * @notice 获取用户历史风险数据
+     * @dev 从本地存储读取用户历史预测记录
+     * @param _user 用户地址
+     * @param _limit 返回记录数量限制
+     * @param _offset 起始偏移量
+     * @return historicalData 历史预测数组
+     */
+    function getHistoricalRiskData(
+        address _user,
+        uint256 _limit,
+        uint256 _offset
+    ) external view returns (HistoricalPrediction[] memory historicalData) {
+        HistoricalPrediction[] storage history = historicalPredictions[_user];
+
+        if (history.length == 0) {
+            revert NoHistoricalData(_user);
+        }
+
+        uint256 actualLimit = _limit;
+        if (_offset >= history.length) {
+            return new HistoricalPrediction[](0);
+        }
+        if (_offset + _limit > history.length) {
+            actualLimit = history.length - _offset;
+        }
+
+        historicalData = new HistoricalPrediction[](actualLimit);
+        for (uint256 i = 0; i < actualLimit; i++) {
+            historicalData[i] = history[_offset + i];
+        }
+
+        return historicalData;
+    }
+
+    /**
+     * @notice 获取用户当前风险评分详情
+     * @param _user 用户地址
+     * @return riskScore 风险评分结构体
+     */
+    function getRiskScoreDetails(address _user) external view returns (RiskScore memory riskScore) {
+        riskScore = riskScores[_user];
+        if (riskScore.timestamp == 0) {
+            revert PredictionNotAvailable(_user);
+        }
+        return riskScore;
+    }
+
+    /**
+     * @notice 更新评分更新间隔
+     * @dev 仅合约所有者可调用
+     * @param _newInterval 新的更新间隔 (秒)
+     */
+    function updateScoreUpdateInterval(uint256 _newInterval) external onlyOwner {
+        uint256 oldInterval = scoreUpdateInterval;
+        scoreUpdateInterval = _newInterval;
+        emit ScoreUpdateIntervalChanged(oldInterval, _newInterval);
+    }
+
+    /**
+     * @notice 验证风险评分证明
+     * @param _user 用户地址
+     * @return isValid 评分是否有效
+     */
+    function verifyRiskScoreProof(address _user) external view returns (bool isValid) {
+        RiskScore memory rs = riskScores[_user];
+        if (rs.timestamp == 0) {
+            return false;
+        }
+        bytes32 computedProof = keccak256(abi.encode(_user, rs.score, rs.factors, rs.timestamp));
+        return rs.daProof == computedProof || daProofs[rs.daProof];
+    }
+
+    /**
+     * @notice 记录预测到历史数据
+     * @dev 当有新预测时自动调用
+     * @param _user 用户地址
+     * @param _probability 清算概率
+     * @param _healthFactor 健康因子
+     */
+    function recordPrediction(address _user, uint256 _probability, uint256 _healthFactor) external {
+        HistoricalPrediction[] storage history = historicalPredictions[_user];
+
+        if (history.length >= MAX_HISTORY_LENGTH) {
+            delete historicalPredictions[_user];
+        }
+
+        historicalPredictions[_user].push(HistoricalPrediction({
+            probability: _probability,
+            healthFactor: _healthFactor,
+            timestamp: block.timestamp
+        }));
+    }
+
+    /**
+     * @notice 获取历史预测数量
+     * @param _user 用户地址
+     * @return count 历史记录数量
+     */
+    function getHistoricalPredictionCount(address _user) external view returns (uint256 count) {
+        return historicalPredictions[_user].length;
+    }
+
     /**
      * @notice 验证 DA 证明
      * @param _daProof DA 证明哈希
@@ -247,8 +664,6 @@ contract OgIntegration is Ownable, ReentrancyGuard {
     function verifyDAProof(bytes32 _daProof) external view returns (bool isValid) {
         return daProofs[_daProof];
     }
-
-    // ============ 内部函数 ============
 
     /**
      * @notice 计算基础清算概率

@@ -70,4 +70,18 @@ interface IAavePool {
         bytes calldata params,
         uint16 referralCode
     ) external;
+
+    /**
+     * @notice 偿还 Aave 债务
+     * @param asset 偿还的资产地址
+     * @param amount 偿还数量（使用 type(uint256).max 偿还全部债务）
+     * @param rateMode 利率模式 (1: 稳定利率, 2: 浮动利率)
+     * @param onBehalfOf 代表哪个地址偿还
+     */
+    function repay(
+        address asset,
+        uint256 amount,
+        uint256 rateMode,
+        address onBehalfOf
+    ) external;
 }
