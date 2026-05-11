@@ -1,0 +1,17 @@
+{
+  "network": {
+    "name": "testnet",
+    "chainId": 16602
+  },
+  "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "deployedAt": "2026-05-09T15:53:26.772Z",
+  "contracts": {
+    "OgIntegration": {
+      "address": "0x63fea6E447F120B8Faf85B53cdaD8348e645D80E",
+      "transactionHash": "0x7e257ce164d9ef6cec82235477ed81ee3c803c0ae3117d29bad2c0f71e623151",
+      "constructorArgs": {
+        "initialOwner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+      }
+    }
+  }
+}

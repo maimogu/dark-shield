@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IAavePool.sol";
 import "./interfaces/IWETH.sol";
 import "./TEEDecisionVerifier.sol";
+import "./interfaces/I0GIntegration.sol";
 
 /**
  * @title IFlashLoanReceiver
@@ -88,6 +89,9 @@ contract RiskHedgeExecutor is Ownable, ReentrancyGuard, IFlashLoanReceiver {
     /// @notice TEE 决策验证合约地址
     address public teeVerifier;
 
+    /// @notice 0G Integration 合约地址
+    address public zeroGIntegration;
+
     /// @notice 用户配置映射
     mapping(address => UserConfig) public userConfigs;
 
@@ -118,6 +122,15 @@ contract RiskHedgeExecutor is Ownable, ReentrancyGuard, IFlashLoanReceiver {
 
     /// @notice 用户配置更新事件
     event UserConfigUpdated(address indexed user);
+
+    /// @notice 0G 预测风险检查事件
+    event RiskCheckWith0G(
+        address indexed user,
+        uint256 healthFactor,
+        uint256 aiProbability,
+        uint256 aiConfidence,
+        uint256 onChainRiskScore
+    );
 
     // ============ 错误 ============
 
@@ -207,6 +220,16 @@ contract RiskHedgeExecutor is Ownable, ReentrancyGuard, IFlashLoanReceiver {
     function setTEEVerifier(address _teeVerifier) external onlyOwner {
         require(_teeVerifier != address(0), "TEE Verifier address cannot be zero");
         teeVerifier = _teeVerifier;
+    }
+
+    /**
+     * @notice 设置 0G Integration 合约地址
+     * @dev 仅合约所有者可调用
+     * @param _zeroGIntegration 0G Integration 合约地址
+     */
+    function setZeroGIntegration(address _zeroGIntegration) external onlyOwner {
+        require(_zeroGIntegration != address(0), "Invalid address");
+        zeroGIntegration = _zeroGIntegration;
     }
 
     /**
@@ -301,6 +324,76 @@ contract RiskHedgeExecutor is Ownable, ReentrancyGuard, IFlashLoanReceiver {
                 _executeHedge(_user, hedgeAmount, 2, usdc);
 
                 // 更新最后操作时间
+                lastActionTime[_user] = block.timestamp;
+            }
+        }
+    }
+
+    /// @notice 0G 预测置信度阈值
+    uint256 public constant AI_CONFIDENCE_THRESHOLD = 70;
+
+    /**
+     * @notice 使用 0G AI 预测进行风险检查
+     * @dev 获取用户账户数据，调用 0G Integration 获取 AI 预测
+     *      如果 0G 预测可用且置信度 > 70%，使用 AI 预测
+     *      否则使用基本的 on-chain 计算
+     * @param _user 目标用户地址
+     */
+    function triggerRiskCheckWith0G(address _user) external nonReentrant {
+        UserConfig storage config = userConfigs[_user];
+
+        if (!config.enabled) {
+            revert UserNotEnabled(_user);
+        }
+
+        (
+            uint256 totalCollateral,
+            uint256 totalDebt,
+            ,
+            ,
+            ,
+            uint256 healthFactor
+        ) = aavePool.getUserAccountData(_user);
+
+        uint256 onChainScore = riskScores[_user];
+        uint256 aiProbability = 0;
+        uint256 aiConfidence = 0;
+        uint256 effectiveRiskScore = onChainScore;
+
+        if (zeroGIntegration != address(0)) {
+            try I0GIntegration(zeroGIntegration).requestPrediction(
+                _user,
+                healthFactor,
+                totalDebt,
+                totalCollateral
+            ) returns (I0GIntegration.LiquidationPrediction memory prediction) {
+                aiProbability = prediction.probability;
+                aiConfidence = prediction.confidence;
+
+                if (aiConfidence > AI_CONFIDENCE_THRESHOLD) {
+                    effectiveRiskScore = (prediction.probability * 100) / 10000;
+                }
+            } catch {
+                effectiveRiskScore = onChainScore;
+            }
+        }
+
+        emit RiskCheckWith0G(_user, healthFactor, aiProbability, aiConfidence, effectiveRiskScore);
+
+        string memory severity = _calculateSeverity(healthFactor, effectiveRiskScore);
+        emit RiskAlert(_user, healthFactor, effectiveRiskScore, severity);
+
+        if (config.autoExecute && effectiveRiskScore > AUTO_EXECUTE_RISK_THRESHOLD) {
+            _checkCooldown(_user, config.cooldownPeriod);
+
+            uint256 hedgeAmount = _calculateHedgeAmount(
+                healthFactor,
+                totalDebt,
+                config.maxHedgeAmount
+            );
+
+            if (hedgeAmount > 0) {
+                _executeHedge(_user, hedgeAmount, 2, usdc);
                 lastActionTime[_user] = block.timestamp;
             }
         }
